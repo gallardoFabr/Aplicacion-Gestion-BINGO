@@ -1,0 +1,2347 @@
+"""
+Aplicación de escritorio - Control de Bingos
+=============================================
+Permite gestionar el pago de 4000 cartones de bingo (numerados 1 a 4000),
+registrando si fueron pagados, con qué método (Efectivo / Yape) y a qué
+precio se vendieron. El precio general se puede cambiar en cualquier
+momento y solo afecta a los bingos que todavía no han sido vendidos;
+los ya vendidos conservan el precio con el que se registraron.
+
+Requisitos: Python 3.8+ (tkinter y sqlite3 vienen incluidos en Python).
+Opcional: Pillow (PIL) para poder usar imágenes JPG/JPEG en el logo
+          (si no está instalado, igual funciona con PNG/GIF).
+
+Para ejecutar:
+    python3 app.py
+"""
+
+import os
+import sqlite3
+import base64
+import io
+from datetime import datetime
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.pdfgen import canvas as pdf_canvas
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+import sys
+# ---------------------------------------------------------------------------
+# Configuración general
+# ---------------------------------------------------------------------------
+if getattr(sys, "frozen", False):
+    # La app está corriendo como .exe compilado
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # La app está corriendo como script .py normal
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "bingo.db")
+TOTAL_BINGOS = 4000
+PRECIO_INICIAL = 10.0
+
+# Nombres provisionales: cámbialos por los nombres reales de cada pastoral.
+PASTORALES = [
+    "CSFB",
+    "Pastoral Movimiento",
+    "Pastoral Salud",
+    "Pastoral Social",
+    "EPAP",
+    "Pastoral Infantil",
+    "Pastoral Familiar",
+    "Administración",
+    "Pastoral Liturgia",
+    "Pastoral Catequesis",
+    "Pastoral Devociones",
+    "Pastoral Juvenil",
+    "Otros",
+]
+
+# Logo de la parroquia, incrustado directamente en el código como base64.
+# Así no depende de ningún archivo externo ni se puede cambiar desde la
+# app: siempre se muestra esta misma imagen.
+LOGO_BASE64 = (
+    "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"
+    "gg=="
+)
+
+
+# ---------------------------------------------------------------------------
+# CAPA DE BASE DE DATOS
+# ---------------------------------------------------------------------------
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    return conn
+
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS bingos (
+            numero INTEGER PRIMARY KEY,
+            pagado INTEGER NOT NULL DEFAULT 0,
+            metodo_pago TEXT,
+            precio REAL,
+            fecha_pago TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS configuracion (
+            clave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS historial_precios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            precio REAL NOT NULL,
+            fecha_hora TEXT NOT NULL
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pastorales (
+            nombre TEXT PRIMARY KEY,
+            cantidad_asignada INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS rangos_pastorales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pastoral TEXT NOT NULL,
+            inicio INTEGER NOT NULL,
+            fin INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+
+    # Migración: si la tabla "bingos" ya existía de antes (sin la columna
+    # "pastoral"), la agregamos. Si ya existe, el ALTER falla y lo ignoramos.
+    try:
+        c.execute("ALTER TABLE bingos ADD COLUMN pastoral TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    # Migración: columna para la pastoral "asignada" por rango (independiente
+    # de quién termine vendiendo el bingo).
+    try:
+        c.execute("ALTER TABLE bingos ADD COLUMN pastoral_asignada TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    for nombre in PASTORALES:
+        c.execute("SELECT 1 FROM pastorales WHERE nombre=?", (nombre,))
+        if c.fetchone() is None:
+            c.execute(
+                "INSERT INTO pastorales (nombre, cantidad_asignada) VALUES (?, 0)",
+                (nombre,),
+            )
+    conn.commit()
+
+    c.execute("SELECT COUNT(*) FROM bingos")
+    if c.fetchone()[0] == 0:
+        c.executemany(
+            "INSERT INTO bingos (numero, pagado, metodo_pago, precio, fecha_pago) "
+            "VALUES (?, 0, NULL, NULL, NULL)",
+            [(n,) for n in range(1, TOTAL_BINGOS + 1)],
+        )
+
+    c.execute("SELECT 1 FROM configuracion WHERE clave='precio_actual'")
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO configuracion (clave, valor) VALUES ('precio_actual', ?)",
+            (str(PRECIO_INICIAL),),
+        )
+        c.execute(
+                    "INSERT INTO historial_precios (precio, fecha_hora) VALUES (?, ?)",
+                    (str(PRECIO_INICIAL), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                )  
+    
+
+    c.execute("SELECT 1 FROM configuracion WHERE clave='imagen_path'")
+    if c.fetchone() is None:
+        c.execute("INSERT INTO configuracion (clave, valor) VALUES ('imagen_path', '')")
+
+    conn.commit()
+    conn.close()
+
+
+def get_precio_actual():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT valor FROM configuracion WHERE clave='precio_actual'")
+    row = c.fetchone()
+    conn.close()
+    return float(row[0]) if row else PRECIO_INICIAL
+
+
+def set_precio_actual(nuevo_precio):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE configuracion SET valor=? WHERE clave='precio_actual'",
+        (str(nuevo_precio),),
+    )
+    c.execute(
+        "INSERT INTO historial_precios (precio, fecha_hora) VALUES (?, ?)",
+        (str(nuevo_precio), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pastorales_asignaciones():
+    """Devuelve [(nombre, cantidad_asignada), ...] para las 9 pastorales."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT nombre, cantidad_asignada FROM pastorales ORDER BY rowid ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def set_cantidad_asignada(nombre, cantidad):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE pastorales SET cantidad_asignada=? WHERE nombre=?",
+        (cantidad, nombre),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_rangos_pastoral(nombre):
+    """Devuelve [(id, inicio, fin), ...] ordenados, para una pastoral."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, inicio, fin FROM rangos_pastorales WHERE pastoral=? ORDER BY inicio ASC",
+        (nombre,),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_todos_los_rangos():
+    """Devuelve {pastoral: [(inicio, fin), ...]} para las 9 pastorales."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT pastoral, inicio, fin FROM rangos_pastorales ORDER BY pastoral, inicio ASC")
+    rows = c.fetchall()
+    conn.close()
+    resultado = {nombre: [] for nombre in PASTORALES}
+    for pastoral, inicio, fin in rows:
+        resultado.setdefault(pastoral, []).append((inicio, fin))
+    return resultado
+
+
+def get_asignados_pastoral(nombre):
+    """Cantidad total de bingos asignados a una pastoral (suma de sus rangos)."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT inicio, fin FROM rangos_pastorales WHERE pastoral=?", (nombre,))
+    rows = c.fetchall()
+    conn.close()
+    return sum((fin - inicio + 1) for inicio, fin in rows)
+
+
+def agregar_rango_pastoral(nombre, inicio, fin):
+    """Registra un rango [inicio, fin] asignado a una pastoral, y actualiza
+    la columna 'pastoral_asignada' de los bingos de ese rango que TODAVÍA
+    no han sido vendidos (los ya vendidos no se tocan).
+
+    Antes de registrar, valida que el rango no se cruce con NINGÚN otro
+    rango ya asignado — ni de otra pastoral, ni de la misma. Si hay
+    superposición, lanza ValueError con un mensaje explicando el choque.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+
+    # Dos rangos [a,b] y [c,d] se cruzan si a <= d y c <= b.
+    c.execute(
+        "SELECT pastoral, inicio, fin FROM rangos_pastorales "
+        "WHERE inicio <= ? AND fin >= ? "
+        "ORDER BY inicio ASC LIMIT 1",
+        (fin, inicio),
+    )
+    choque = c.fetchone()
+    if choque:
+        conn.close()
+        pastoral_choque, ini_choque, fin_choque = choque
+        raise ValueError(
+            f"El rango {inicio}-{fin} se cruza con el rango {ini_choque}-{fin_choque}, "
+            f"que ya está asignado a '{pastoral_choque}'."
+        )
+
+    c.execute(
+        "INSERT INTO rangos_pastorales (pastoral, inicio, fin) VALUES (?, ?, ?)",
+        (nombre, inicio, fin),
+    )
+    c.execute(
+        "UPDATE bingos SET pastoral_asignada=? WHERE numero BETWEEN ? AND ? AND pagado=0",
+        (nombre, inicio, fin),
+    )
+    conn.commit()
+    conn.close()
+
+
+def contar_pagados_rango(inicio, fin):
+    """Cuántos bingos del rango [inicio, fin] están actualmente pagados
+    (para avisar antes de quitar un rango, ya que se revertirían)."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT COUNT(*) FROM bingos WHERE numero BETWEEN ? AND ? AND pagado=1",
+        (inicio, fin),
+    )
+    n = c.fetchone()[0]
+    conn.close()
+    return n
+
+
+def eliminar_rango_pastoral(rango_id):
+    """Elimina un rango. Además:
+    - A los bingos de ese rango que YA estaban vendidos, se les revierte
+      la venta (quedan como no pagados, sin método, precio ni pastoral),
+      ya que el rango que los originó se está eliminando.
+    - A los bingos de ese rango que seguían sin vender, se les quita la
+      pastoral asignada.
+    """
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT pastoral, inicio, fin FROM rangos_pastorales WHERE id=?", (rango_id,))
+    row = c.fetchone()
+    if row:
+        pastoral, inicio, fin = row
+        c.execute("DELETE FROM rangos_pastorales WHERE id=?", (rango_id,))
+
+        # Revertir la venta de los bingos de este rango que ya estaban pagados
+        c.execute(
+            "UPDATE bingos SET pagado=0, metodo_pago=NULL, precio=NULL, fecha_pago=NULL, pastoral=NULL "
+            "WHERE numero BETWEEN ? AND ? AND pagado=1",
+            (inicio, fin),
+        )
+
+        # A los que sigan sin vender, quitarles la pastoral asignada
+        c.execute(
+            "UPDATE bingos SET pastoral_asignada=NULL "
+            "WHERE numero BETWEEN ? AND ? AND pagado=0 AND pastoral_asignada=?",
+            (inicio, fin, pastoral),
+        )
+        conn.commit()
+    conn.close()
+
+
+def marcar_pagado_rango(pastoral, inicio, fin, metodo, precio):
+    """Marca como PAGADOS, de una sola vez, todos los bingos del rango
+    [inicio, fin] que TODAVÍA no estaban vendidos, con el método y precio
+    indicados, dejando su pastoral en 'pastoral'. Los que ya estaban
+    vendidos NO se tocan (para no pisar una venta ya registrada).
+
+    Devuelve (cantidad_marcada, cantidad_omitida_por_ya_estar_vendida).
+    """
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute(
+        "SELECT COUNT(*) FROM bingos WHERE numero BETWEEN ? AND ? AND pagado=1",
+        (inicio, fin),
+    )
+    ya_vendidos = c.fetchone()[0]
+
+    c.execute(
+        "UPDATE bingos SET pagado=1, metodo_pago=?, precio=?, fecha_pago=?, pastoral=? "
+        "WHERE numero BETWEEN ? AND ? AND pagado=0",
+        (metodo, precio, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pastoral, inicio, fin),
+    )
+    marcados = c.rowcount
+    conn.commit()
+    conn.close()
+    return marcados, ya_vendidos
+
+
+def marcar_pagado(numero, metodo, precio, pastoral):
+    """Marca un bingo como pagado. El precio queda fijo para siempre,
+    sin importar si luego cambia el precio general."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE bingos SET pagado=1, metodo_pago=?, precio=?, fecha_pago=?, pastoral=? WHERE numero=?",
+        (metodo, precio, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), pastoral, numero),
+    )
+    conn.commit()
+    conn.close()
+
+
+def marcar_no_pagado(numero):
+    # Ojo: NO se toca "pastoral_asignada" — esa viene del rango asignado y
+    # es independiente de si el bingo está vendido o no. Solo se limpia
+    # "pastoral" (quién lo vendió), porque la venta se está revirtiendo.
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE bingos SET pagado=0, metodo_pago=NULL, precio=NULL, fecha_pago=NULL, pastoral=NULL WHERE numero=?",
+        (numero,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_bingo(numero):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT numero, pagado, metodo_pago, precio, pastoral, pastoral_asignada FROM bingos WHERE numero=?",
+        (numero,),
+    )
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def buscar_bingos(numero=None, estado=None, metodo=None, precio=None, pastoral=None):
+    """
+    estado: None/'todos', 'pagado', 'no_pagado'
+    metodo: None/'todos', 'efectivo', 'yape'
+    precio: None/'todos' o un valor numérico exacto
+    pastoral: None/'todos' o el nombre exacto de una pastoral. Se filtra por
+              la pastoral "mostrada": si el bingo está vendido, es quién lo
+              vendió; si no, es la pastoral asignada por rango.
+    Devuelve: [(numero, pagado, metodo_pago, precio, pastoral_mostrada), ...]
+    """
+    query = """
+        SELECT numero, pagado, metodo_pago, precio,
+               CASE WHEN pagado=1 THEN pastoral ELSE pastoral_asignada END AS pastoral_mostrada
+        FROM bingos
+        WHERE 1=1
+    """
+    params = []
+
+    if numero:
+        query += " AND CAST(numero AS TEXT) LIKE ?"
+        params.append(f"{numero}%")
+
+    if estado == "pagado":
+        query += " AND pagado=1"
+    elif estado == "no_pagado":
+        query += " AND pagado=0"
+
+    if metodo and metodo != "todos":
+        query += " AND metodo_pago=?"
+        params.append(metodo)
+
+    if precio and precio != "todos":
+        query += " AND precio=?"
+        params.append(float(precio))
+
+    if pastoral and pastoral != "todos":
+        query += " AND pastoral_mostrada=?"
+        params.append(pastoral)
+
+    query += " ORDER BY numero ASC"
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_precios_distintos():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT precio FROM bingos WHERE precio IS NOT NULL ORDER BY precio ASC")
+    rows = [str(r[0]) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_stats():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM bingos WHERE pagado=1")
+    vendidos = c.fetchone()[0]
+
+    c.execute("SELECT COALESCE(SUM(precio),0) FROM bingos WHERE pagado=1")
+    total = c.fetchone()[0]
+
+    c.execute("SELECT COALESCE(SUM(precio),0) FROM bingos WHERE pagado=1 AND metodo_pago='efectivo'")
+    total_efectivo = c.fetchone()[0]
+
+    c.execute("SELECT COALESCE(SUM(precio),0) FROM bingos WHERE pagado=1 AND metodo_pago='yape'")
+    total_yape = c.fetchone()[0]
+
+    conn.close()
+    return {
+        "vendidos": vendidos,
+        "total": total,
+        "efectivo": total_efectivo,
+        "yape": total_yape,
+    }
+
+def get_historial_precios():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT precio, fecha_hora FROM historial_precios ORDER BY id ASC")
+    rows = c.fetchall()
+    conn.close()
+    return rows  # [(precio, fecha_hora), ...]
+
+def get_reporte_data():
+    """Arma toda la información necesaria para el reporte:
+    - Total vendidos (cantidad y monto)
+    - Cantidad vendida por cada precio distinto
+    - Cantidad y monto vendido por cada método de pago
+    """
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*), COALESCE(SUM(precio), 0) FROM bingos WHERE pagado=1")
+    cantidad_total, monto_total = c.fetchone()
+
+    c.execute("""
+        SELECT precio, COUNT(*), COALESCE(SUM(precio), 0)
+        FROM bingos
+        WHERE pagado=1
+        GROUP BY precio
+        ORDER BY precio DESC
+    """)
+    por_precio = c.fetchall()  # [(precio, cantidad, subtotal), ...]
+
+    por_metodo = {}
+    for metodo in ("efectivo", "yape"):
+        c.execute("""
+            SELECT COUNT(*), COALESCE(SUM(precio), 0)
+            FROM bingos
+            WHERE pagado=1 AND metodo_pago=?
+        """, (metodo,))
+        cantidad, monto = c.fetchone()
+        por_metodo[metodo] = {"cantidad": cantidad, "monto": monto}
+    historial = get_historial_precios()
+
+    c.execute("SELECT nombre, cantidad_asignada FROM pastorales ORDER BY rowid ASC")
+    asignaciones = dict(c.fetchall())
+
+    rangos_por_pastoral = get_todos_los_rangos()
+
+    por_pastoral = []
+    for nombre in PASTORALES:
+        c.execute("""
+            SELECT COUNT(*), COALESCE(SUM(precio), 0)
+            FROM bingos
+            WHERE pagado=1 AND pastoral=?
+        """, (nombre,))
+        cantidad, monto = c.fetchone()
+
+        rangos = rangos_por_pastoral.get(nombre, [])
+        asignados = sum((fin - inicio + 1) for inicio, fin in rangos)
+        porcentaje = (cantidad / asignados * 100) if asignados > 0 else 0.0
+
+        # Bingos que eran de su rango, ya se vendieron, pero los vendió
+        # (o quedaron registrados con) OTRA pastoral distinta.
+        c.execute("""
+            SELECT numero, pastoral
+            FROM bingos
+            WHERE pagado=1 AND pastoral_asignada=? AND (pastoral IS NULL OR pastoral != ?)
+            ORDER BY numero ASC
+        """, (nombre, nombre))
+        vendidos_fuera = c.fetchall()  # [(numero, pastoral_que_lo_vendio), ...]
+
+        por_pastoral.append({
+            "nombre": nombre,
+            "cantidad": cantidad,
+            "monto": monto,
+            "asignados": asignados,
+            "porcentaje": porcentaje,
+            "rangos": rangos,
+            "vendidos_fuera": vendidos_fuera,
+        })
+
+    conn.close()
+    return {
+        "cantidad_total": cantidad_total,
+        "monto_total": monto_total,
+        "por_precio": por_precio,
+        "por_metodo": por_metodo,
+        "historial_precios": historial,
+        "por_pastoral": por_pastoral,
+    }
+
+
+# ---------------------------------------------------------------------------
+# INTERFAZ GRÁFICA
+# ---------------------------------------------------------------------------
+VERDE_PAGADO = "#a5d6a7"
+VERDE_PAGADO_TEXTO = "#1b5e20"
+NEUTRO = "#ffffff"
+
+
+class BingoApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Control de Bingos")
+        self.geometry("1150x700")
+        self.minsize(950, 600)
+        self.configure(bg="#f4f4f4")
+
+        self._logo_imgtk = None  # referencia para que no se borre por el GC
+
+        self._build_layout()
+        self.refrescar_todo()
+
+    # ------------------------------------------------------------------
+    # Construcción de la interfaz
+    # ------------------------------------------------------------------
+    def _build_layout(self):
+        # ---------- Encabezado ----------
+        header = tk.Frame(self, bg="#f4f4f4")
+        header.pack(fill="x", padx=20, pady=(15, 5))
+
+        tk.Label(
+            header, text="BINGO", font=("Arial", 32, "bold"),
+            bg="#f4f4f4", fg="#212121"
+        ).pack(side="left")
+
+        logo_frame = tk.Frame(header, bg="#f4f4f4")
+        logo_frame.pack(side="right")
+        self.logo_label = tk.Label(logo_frame, bg="#f4f4f4")
+        self.logo_label.pack()
+        self._cargar_logo()
+
+        # ---------- Cuerpo: grilla (izquierda) + panel (derecha) ----------
+        body = tk.Frame(self, bg="#f4f4f4")
+        body.pack(fill="both", expand=True, padx=20, pady=10)
+
+        left = tk.Frame(body, bg="#f4f4f4")
+        left.pack(side="left", fill="both", expand=True)
+
+        right = tk.Frame(body, bg="#f4f4f4", width=300)
+        right.pack(side="right", fill="y", padx=(15, 0))
+        right.pack_propagate(False)
+
+        self._build_buscador(left)
+        self._build_grilla(left)
+        self._build_panel_lateral(right)
+
+    # ---------------- Logo ----------------
+    def _cargar_logo(self):
+        # El logo viene incrustado en el propio código (ver LOGO_BASE64 más
+        # arriba en el archivo) — ya no se puede cambiar desde la app.
+        size = (90, 90)
+        try:
+            if PIL_AVAILABLE:
+                datos = base64.b64decode(LOGO_BASE64)
+                img = Image.open(io.BytesIO(datos))
+                img.thumbnail(size)
+                self._logo_imgtk = ImageTk.PhotoImage(img)
+            else:
+                img = tk.PhotoImage(data=LOGO_BASE64)
+                factor_ancho = max(1, img.width() // size[0])
+                factor_alto = max(1, img.height() // size[1])
+                factor = max(factor_ancho, factor_alto)
+                if factor > 1:
+                    img = img.subsample(factor, factor)
+                self._logo_imgtk = img
+            self.logo_label.configure(image=self._logo_imgtk, text="")
+        except Exception:
+            self.logo_label.configure(
+                text="(sin imagen)", image="", font=("Arial", 9), fg="#888"
+            )
+
+    # ---------------- Buscador / filtros ----------------
+    def _build_buscador(self, parent):
+        frame = tk.LabelFrame(parent, text="Buscar y filtrar", bg="#f4f4f4", font=("Arial", 12, "bold"))
+        frame.pack(fill="x", pady=(0, 10))
+
+        tk.Label(frame, text="N° de bingo:", bg="#f4f4f4", font=("Arial", 11)).grid(row=0, column=0, padx=5, pady=8, sticky="w")
+        self.var_busqueda = tk.StringVar()
+        entry_busqueda = tk.Entry(frame, textvariable=self.var_busqueda, width=12, font=("Arial", 11))
+        entry_busqueda.grid(row=0, column=1, padx=5, pady=8)
+        entry_busqueda.bind("<Return>", lambda e: self.refrescar_grilla())
+        entry_busqueda.bind("<KeyRelease>", lambda e: self.refrescar_grilla())
+
+        tk.Label(frame, text="Estado:", bg="#f4f4f4", font=("Arial", 11)).grid(row=0, column=2, padx=5, sticky="w")
+        self.var_estado = tk.StringVar(value="todos")
+        combo_estado = ttk.Combobox(
+            frame, textvariable=self.var_estado, state="readonly", width=12,
+            values=["todos", "pagado", "no_pagado"], font=("Arial", 11)
+        )
+        combo_estado.grid(row=0, column=3, padx=5)
+        combo_estado.bind("<<ComboboxSelected>>", lambda e: self.refrescar_grilla())
+
+        tk.Label(frame, text="Método:", bg="#f4f4f4", font=("Arial", 11)).grid(row=0, column=4, padx=5, sticky="w")
+        self.var_metodo = tk.StringVar(value="todos")
+        combo_metodo = ttk.Combobox(
+            frame, textvariable=self.var_metodo, state="readonly", width=12,
+            values=["todos", "efectivo", "yape"], font=("Arial", 11)
+        )
+        combo_metodo.grid(row=0, column=5, padx=5)
+        combo_metodo.bind("<<ComboboxSelected>>", lambda e: self.refrescar_grilla())
+
+        tk.Label(frame, text="Precio:", bg="#f4f4f4", font=("Arial", 11)).grid(row=0, column=6, padx=5, sticky="w")
+        self.var_precio_filtro = tk.StringVar(value="todos")
+        self.combo_precio_filtro = ttk.Combobox(
+            frame, textvariable=self.var_precio_filtro, state="readonly", width=10,
+            values=["todos"], font=("Arial", 11)
+        )
+        self.combo_precio_filtro.grid(row=0, column=7, padx=5)
+        self.combo_precio_filtro.bind("<<ComboboxSelected>>", lambda e: self.refrescar_grilla())
+
+        tk.Label(frame, text="Pastoral:", bg="#f4f4f4", font=("Arial", 11)).grid(row=1, column=0, padx=5, pady=(0, 8), sticky="w")
+        self.var_pastoral_filtro = tk.StringVar(value="todos")
+        combo_pastoral = ttk.Combobox(
+            frame, textvariable=self.var_pastoral_filtro, state="readonly", width=18,
+            values=["todos"] + PASTORALES, font=("Arial", 11)
+        )
+        combo_pastoral.grid(row=1, column=1, columnspan=2, padx=5, pady=(0, 8), sticky="w")
+        combo_pastoral.bind("<<ComboboxSelected>>", lambda e: self.refrescar_grilla())
+
+        tk.Button(frame, text="Limpiar filtros", command=self.limpiar_filtros, font=("Arial", 11)).grid(row=0, column=8, padx=10)
+
+    def limpiar_filtros(self):
+        self.var_busqueda.set("")
+        self.var_estado.set("todos")
+        self.var_metodo.set("todos")
+        self.var_precio_filtro.set("todos")
+        self.var_pastoral_filtro.set("todos")
+        self.refrescar_grilla()
+
+    # ---------------- Grilla principal ----------------
+    def _build_grilla(self, parent):
+        frame = tk.Frame(parent, bg="#f4f4f4")
+        frame.pack(fill="both", expand=True)
+
+        columns = ("numero", "estado", "metodo", "precio", "pastoral")
+        
+        style = ttk.Style()
+        style.configure(
+            "Treeview",
+            font=("Segoe UI", 11),      # tipografía y tamaño de las filas
+            rowheight=28,               # alto de cada fila (ajústalo si agrandas la letra)
+            foreground="#212121",       # color del texto normal
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("Segoe UI", 11, "bold"),  # tipografía de los encabezados (N° Bingo, Estado, etc.)
+        )
+        
+        self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("numero", text="N° Bingo")
+        self.tree.heading("estado", text="Estado")
+        self.tree.heading("metodo", text="Método de pago")
+        self.tree.heading("precio", text="Precio (S/)")
+        self.tree.heading("pastoral", text="Pastoral")
+
+        self.tree.column("numero", width=90, anchor="center")
+        self.tree.column("estado", width=120, anchor="center")
+        self.tree.column("metodo", width=130, anchor="center")
+        self.tree.column("precio", width=100, anchor="center")
+        self.tree.column("pastoral", width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.tag_configure("pagado", background=VERDE_PAGADO, foreground=VERDE_PAGADO_TEXTO)
+        self.tree.tag_configure("no_pagado", background=NEUTRO, foreground="#212121")
+
+        self.tree.bind("<Double-1>", lambda e: self.abrir_dialogo_pago())
+        self.tree.bind("<Return>", lambda e: self.abrir_dialogo_pago())
+
+        tk.Label(
+            parent, text="Doble clic (o Enter) sobre un bingo para marcar/editar el pago",
+            bg="#f4f4f4", fg="#666", font=("Arial", 9, "italic")
+        ).pack(anchor="w", pady=(4, 0))
+
+    # ---------------- Panel lateral (contadores + config precio) ----------------
+    def _build_panel_lateral(self, parent):
+        # --- Contadores ---
+        stats_frame = tk.LabelFrame(parent, text="Resumen", bg="#f4f4f4", font=("Arial", 10, "bold"))
+        stats_frame.pack(fill="x", pady=(0, 12))
+
+        self.lbl_vendidos = tk.Label(
+            stats_frame, text="0 / 4000", font=("Arial", 26, "bold"),
+            bg="#f4f4f4", fg="#1565c0"
+        )
+        self.lbl_vendidos.pack(pady=(8, 0))
+        tk.Label(stats_frame, text="Bingos vendidos", bg="#f4f4f4", font=("Arial", 10)).pack()
+
+        self.lbl_total = tk.Label(
+            stats_frame, text="S/ 0.00", font=("Arial", 26, "bold"),
+            bg="#f4f4f4", fg="#2e7d32"
+        )
+        self.lbl_total.pack(pady=(10, 0))
+        tk.Label(stats_frame, text="Total ganado", bg="#f4f4f4", font=("Arial", 10)).pack(pady=(0, 10))
+
+        sep = ttk.Separator(stats_frame, orient="horizontal")
+        sep.pack(fill="x", padx=10, pady=4)
+
+        efectivo_frame = tk.Frame(stats_frame, bg="#f4f4f4")
+        efectivo_frame.pack(fill="x", padx=10, pady=4)
+        tk.Label(efectivo_frame, text="Efectivo:", bg="#f4f4f4", font=("Arial", 11)).pack(side="left")
+        self.lbl_efectivo = tk.Label(efectivo_frame, text="S/ 0.00", bg="#f4f4f4", font=("Arial", 11, "bold"))
+        self.lbl_efectivo.pack(side="right")
+
+        yape_frame = tk.Frame(stats_frame, bg="#f4f4f4")
+        yape_frame.pack(fill="x", padx=10, pady=(0, 12))
+        tk.Label(yape_frame, text="Yape:", bg="#f4f4f4", font=("Arial", 11)).pack(side="left")
+        self.lbl_yape = tk.Label(yape_frame, text="S/ 0.00", bg="#f4f4f4", font=("Arial", 11, "bold"))
+        self.lbl_yape.pack(side="right")
+
+        # --- Configuración de precio general ---
+        precio_frame = tk.LabelFrame(parent, text="Precio del bingo", bg="#f4f4f4", font=("Arial", 10, "bold"))
+        precio_frame.pack(fill="x", pady=(0, 12))
+
+        self.lbl_precio_actual = tk.Label(
+            precio_frame, text="S/ 10.00", font=("Arial", 20, "bold"),
+            bg="#f4f4f4", fg="#e65100"
+        )
+        self.lbl_precio_actual.pack(pady=(8, 2))
+        tk.Label(
+            precio_frame, text="Precio vigente (solo afecta bingos\ntodavía no vendidos)",
+            bg="#f4f4f4", font=("Arial", 8), fg="#666", justify="center"
+        ).pack()
+
+        cambio_frame = tk.Frame(precio_frame, bg="#f4f4f4")
+        cambio_frame.pack(pady=10)
+        self.var_nuevo_precio = tk.StringVar()
+        tk.Entry(cambio_frame, textvariable=self.var_nuevo_precio, width=8).pack(side="left", padx=(0, 6))
+        tk.Button(cambio_frame, text="Actualizar precio", command=self.cambiar_precio_general).pack(side="left")
+
+        # --- Acciones rápidas ---
+        #tk.Button(
+        #    parent, text="Refrescar todo", command=self.refrescar_todo, font=("Arial", 10)
+        #).pack(fill="x", pady=(6, 0))
+
+        tk.Button(
+            parent, text="Bingos entregados por pastoral", command=self.mostrar_pastorales,
+            font=("Arial", 10)
+        ).pack(fill="x", pady=(6, 0))
+
+        tk.Button(
+            parent, text="Generar reporte", command=self.mostrar_reporte,
+            font=("Arial", 10, "bold"), bg="#1565c0", fg="white"
+        ).pack(fill="x", pady=(8, 0))
+
+    # ------------------------------------------------------------------
+    # Lógica / eventos
+    # ------------------------------------------------------------------
+    def refrescar_todo(self):
+        self.refrescar_grilla()
+        self.refrescar_stats()
+        self.refrescar_filtros_precio()
+
+    def refrescar_filtros_precio(self):
+        actuales = self.combo_precio_filtro["values"]
+        nuevos = ["todos"] + get_precios_distintos()
+        if list(actuales) != nuevos:
+            seleccion = self.var_precio_filtro.get()
+            self.combo_precio_filtro["values"] = nuevos
+            if seleccion not in nuevos:
+                self.var_precio_filtro.set("todos")
+
+    def refrescar_grilla(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        numero_filtro = self.var_busqueda.get().strip()
+        estado_filtro = self.var_estado.get()
+        metodo_filtro = self.var_metodo.get()
+        precio_filtro = self.var_precio_filtro.get()
+        pastoral_filtro = self.var_pastoral_filtro.get()
+
+        rows = buscar_bingos(
+            numero=numero_filtro if numero_filtro else None,
+            estado=estado_filtro,
+            metodo=metodo_filtro,
+            precio=precio_filtro,
+            pastoral=pastoral_filtro,
+        )
+
+        for numero, pagado, metodo, precio, pastoral in rows:
+            if pagado:
+                estado_txt = "PAGADO"
+                metodo_txt = "Yape" if metodo == "yape" else "Efectivo"
+                precio_txt = f"{precio:.2f}"
+                pastoral_txt = pastoral if pastoral else "-"
+                tag = "pagado"
+            else:
+                estado_txt = "No pagado"
+                metodo_txt = "-"
+                precio_txt = "-"
+                # "pastoral" aquí es la pastoral ASIGNADA por rango (si tiene)
+                pastoral_txt = pastoral if pastoral else "-"
+                tag = "no_pagado"
+
+            self.tree.insert(
+                "", "end", iid=str(numero),
+                values=(numero, estado_txt, metodo_txt, precio_txt, pastoral_txt),
+                tags=(tag,),
+            )
+
+    def refrescar_stats(self):
+        stats = get_stats()
+        self.lbl_vendidos.configure(text=f"{stats['vendidos']} / {TOTAL_BINGOS}")
+        self.lbl_total.configure(text=f"S/ {stats['total']:.2f}")
+        self.lbl_efectivo.configure(text=f"S/ {stats['efectivo']:.2f}")
+        self.lbl_yape.configure(text=f"S/ {stats['yape']:.2f}")
+        self.lbl_precio_actual.configure(text=f"S/ {get_precio_actual():.2f}")
+
+    def cambiar_precio_general(self):
+        valor = self.var_nuevo_precio.get().strip().replace(",", ".")
+        if not valor:
+            messagebox.showwarning("Precio inválido", "Ingresa un nuevo precio.")
+            return
+        try:
+            nuevo = float(valor)
+            if nuevo <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Precio inválido", "Ingresa un número mayor a 0.")
+            return
+
+        set_precio_actual(nuevo)
+        self.var_nuevo_precio.set("")
+        self.refrescar_stats()
+        messagebox.showinfo(
+            "Precio actualizado",
+            f"El nuevo precio (S/ {nuevo:.2f}) se aplicará solo a los bingos "
+            "que aún no han sido vendidos.\nLos bingos ya vendidos conservan su precio original.",
+        )
+
+    def abrir_dialogo_pago(self):
+        seleccion = self.tree.selection()
+        if not seleccion:
+            return
+        numero = int(seleccion[0])
+        DialogoPago(self, numero)
+
+    def mostrar_reporte(self):
+        VentanaReporte(self)
+
+    def mostrar_pastorales(self):
+        VentanaPastorales(self)
+
+
+# ---------------------------------------------------------------------------
+# REPORTE
+# ---------------------------------------------------------------------------
+def _texto_reporte(data):
+    """Genera el texto plano del reporte, reutilizado tanto para mostrarlo
+    en pantalla como para exportarlo a un archivo .txt."""
+    lineas = []
+    lineas.append("REPORTE DE BINGOS")
+    lineas.append(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lineas.append("=" * 45)
+    lineas.append(f"Total de bingos vendidos (cantidad): {data['cantidad_total']}")
+    lineas.append(f"Total de bingos vendidos (monto):    S/ {data['monto_total']:.2f}")
+    lineas.append("")
+    lineas.append("Cantidad vendida por precio")
+    lineas.append("-" * 45)
+    if data["por_precio"]:
+        for precio, cantidad, subtotal in data["por_precio"]:
+            lineas.append(f"  S/ {precio:.2f}  ->  {cantidad} bingo(s)  =  S/ {subtotal:.2f}")
+    else:
+        lineas.append("  (sin ventas registradas)")
+    lineas.append("")
+    lineas.append("Por método de pago")
+    lineas.append("-" * 45)
+    ef = data["por_metodo"]["efectivo"]
+    ya = data["por_metodo"]["yape"]
+    lineas.append(f"  Efectivo:  {ef['cantidad']} bingo(s)  =  S/ {ef['monto']:.2f}")
+    lineas.append(f"  Yape:      {ya['cantidad']} bingo(s)  =  S/ {ya['monto']:.2f}")
+    lineas.append("")
+    lineas.append("Por pastoral")
+    lineas.append("-" * 45)
+    for p in data["por_pastoral"]:
+        rango_txt = ", ".join(f"{ini}-{fin}" for ini, fin in p["rangos"]) if p["rangos"] else "sin rango"
+        lineas.append(
+            f"  {p['nombre']} (rango: {rango_txt}): {p['cantidad']} vendido(s) de "
+            f"{p['asignados']} asignado(s) ({p['porcentaje']:.1f}%)  =  S/ {p['monto']:.2f}"
+        )
+    lineas.append("")
+    lineas.append("Bingos vendidos fuera de su pastoral asignada")
+    lineas.append("-" * 45)
+    hay_discrepancias = any(p["vendidos_fuera"] for p in data["por_pastoral"])
+    if not hay_discrepancias:
+        lineas.append("  (no hay ningún caso, todos se vendieron dentro de su rango)")
+    else:
+        for p in data["por_pastoral"]:
+            for numero, vendedor in p["vendidos_fuera"]:
+                lineas.append(
+                    f"  Bingo N° {numero}: asignado a {p['nombre']}, "
+                    f"vendido por {vendedor if vendedor else '-'}"
+                )
+    lineas.append("")
+    lineas.append("Historial de cambios de precio")
+    lineas.append("-" * 45)
+    for precio, fecha_hora in data["historial_precios"]:
+        lineas.append(f"  {fecha_hora}  ->  S/ {precio:.2f}")
+    return "\n".join(lineas)
+
+
+def exportar_reporte_excel(data, bingos, path):
+    """Genera un libro de Excel con:
+    - Hoja "Bingos": los 4000 bingos, con las mismas columnas de la grilla.
+    - Hoja "Resumen": totales generales, por precio y por método de pago.
+    - Hoja "Pastorales": rango, vendidos, asignados, % y discrepancias.
+    - Hoja "Historial de precios".
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl no está instalado")
+
+    wb = openpyxl.Workbook()
+
+    ENCABEZADO_FILL = PatternFill(start_color="1565C0", end_color="1565C0", fill_type="solid")
+    ENCABEZADO_FONT = Font(bold=True, color="FFFFFF")
+    PAGADO_FILL = PatternFill(start_color="A5D6A7", end_color="A5D6A7", fill_type="solid")
+
+    def escribir_encabezados(hoja, encabezados, fila=1):
+        for col, texto in enumerate(encabezados, start=1):
+            celda = hoja.cell(row=fila, column=col, value=texto)
+            celda.font = ENCABEZADO_FONT
+            celda.fill = ENCABEZADO_FILL
+            celda.alignment = Alignment(horizontal="center")
+
+    # ---- Hoja 1: los 4000 bingos, igual que la grilla ----
+    hoja_bingos = wb.active
+    hoja_bingos.title = "Bingos"
+    escribir_encabezados(hoja_bingos, ["N° Bingo", "Estado", "Método de pago", "Precio (S/)", "Pastoral"])
+
+    for fila, (numero, pagado, metodo, precio, pastoral) in enumerate(bingos, start=2):
+        if pagado:
+            estado_txt = "PAGADO"
+            metodo_txt = "Yape" if metodo == "yape" else "Efectivo"
+            precio_val = precio
+            pastoral_txt = pastoral if pastoral else "-"
+        else:
+            estado_txt = "No pagado"
+            metodo_txt = "-"
+            precio_val = None
+            pastoral_txt = pastoral if pastoral else "-"
+
+        hoja_bingos.cell(row=fila, column=1, value=numero)
+        hoja_bingos.cell(row=fila, column=2, value=estado_txt)
+        hoja_bingos.cell(row=fila, column=3, value=metodo_txt)
+        hoja_bingos.cell(row=fila, column=4, value=precio_val)
+        hoja_bingos.cell(row=fila, column=5, value=pastoral_txt)
+
+        if pagado:
+            for col in range(1, 6):
+                hoja_bingos.cell(row=fila, column=col).fill = PAGADO_FILL
+
+    hoja_bingos.freeze_panes = "A2"
+    anchos = [10, 12, 16, 12, 18]
+    for col, ancho in enumerate(anchos, start=1):
+        hoja_bingos.column_dimensions[chr(64 + col)].width = ancho
+
+    # ---- Hoja 2: resumen general ----
+    hoja_resumen = wb.create_sheet("Resumen")
+    hoja_resumen["A1"] = "REPORTE DE BINGOS"
+    hoja_resumen["A1"].font = Font(bold=True, size=14)
+    hoja_resumen["A2"] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+    hoja_resumen["A4"] = "Total de bingos vendidos (cantidad)"
+    hoja_resumen["B4"] = data["cantidad_total"]
+    hoja_resumen["A5"] = "Total de bingos vendidos (monto)"
+    hoja_resumen["B5"] = data["monto_total"]
+    for celda in ("A4", "A5"):
+        hoja_resumen[celda].font = Font(bold=True)
+
+    fila = 7
+    hoja_resumen.cell(row=fila, column=1, value="Cantidad vendida por precio").font = Font(bold=True, size=12)
+    fila += 1
+    escribir_encabezados(hoja_resumen, ["Precio (S/)", "Cantidad", "Subtotal (S/)"], fila)
+    fila += 1
+    for precio, cantidad, subtotal in data["por_precio"]:
+        hoja_resumen.cell(row=fila, column=1, value=precio)
+        hoja_resumen.cell(row=fila, column=2, value=cantidad)
+        hoja_resumen.cell(row=fila, column=3, value=subtotal)
+        fila += 1
+
+    fila += 1
+    hoja_resumen.cell(row=fila, column=1, value="Por método de pago").font = Font(bold=True, size=12)
+    fila += 1
+    escribir_encabezados(hoja_resumen, ["Método", "Cantidad", "Monto (S/)"], fila)
+    fila += 1
+    for nombre_metodo, clave in (("Efectivo", "efectivo"), ("Yape", "yape")):
+        m = data["por_metodo"][clave]
+        hoja_resumen.cell(row=fila, column=1, value=nombre_metodo)
+        hoja_resumen.cell(row=fila, column=2, value=m["cantidad"])
+        hoja_resumen.cell(row=fila, column=3, value=m["monto"])
+        fila += 1
+
+    for col, ancho in zip("ABC", [22, 14, 16]):
+        hoja_resumen.column_dimensions[col].width = ancho
+
+    # ---- Hoja 3: pastorales ----
+    hoja_pastoral = wb.create_sheet("Pastorales")
+    escribir_encabezados(
+        hoja_pastoral,
+        ["Pastoral", "Rango(s) asignado(s)", "Vendidos", "Asignados", "% vendido", "Monto (S/)"],
+    )
+    fila = 2
+    for p in data["por_pastoral"]:
+        rango_txt = ", ".join(f"{ini}-{fin}" for ini, fin in p["rangos"]) if p["rangos"] else "-"
+        hoja_pastoral.cell(row=fila, column=1, value=p["nombre"])
+        hoja_pastoral.cell(row=fila, column=2, value=rango_txt)
+        hoja_pastoral.cell(row=fila, column=3, value=p["cantidad"])
+        hoja_pastoral.cell(row=fila, column=4, value=p["asignados"])
+        hoja_pastoral.cell(row=fila, column=5, value=round(p["porcentaje"], 1))
+        hoja_pastoral.cell(row=fila, column=6, value=p["monto"])
+        fila += 1
+
+    fila += 2
+    hoja_pastoral.cell(row=fila, column=1, value="Bingos vendidos fuera de su pastoral asignada").font = Font(bold=True, size=12)
+    fila += 1
+    escribir_encabezados(hoja_pastoral, ["N° Bingo", "Asignado a", "Vendido por"], fila)
+    fila += 1
+    hay_discrepancias = False
+    for p in data["por_pastoral"]:
+        for numero, vendedor in p["vendidos_fuera"]:
+            hay_discrepancias = True
+            hoja_pastoral.cell(row=fila, column=1, value=numero)
+            hoja_pastoral.cell(row=fila, column=2, value=p["nombre"])
+            hoja_pastoral.cell(row=fila, column=3, value=vendedor if vendedor else "-")
+            fila += 1
+    if not hay_discrepancias:
+        hoja_pastoral.cell(row=fila, column=1, value="(no hay ningún caso)")
+
+    for col, ancho in zip("ABCDEF", [16, 22, 12, 12, 12, 14]):
+        hoja_pastoral.column_dimensions[col].width = ancho
+
+    # ---- Hoja 4: historial de precios ----
+    hoja_historial = wb.create_sheet("Historial de precios")
+    escribir_encabezados(hoja_historial, ["Fecha y hora", "Precio (S/)"])
+    for fila, (precio, fecha_hora) in enumerate(data["historial_precios"], start=2):
+        hoja_historial.cell(row=fila, column=1, value=fecha_hora)
+        hoja_historial.cell(row=fila, column=2, value=precio)
+    for col, ancho in zip("AB", [20, 12]):
+        hoja_historial.column_dimensions[col].width = ancho
+
+    wb.save(path)
+
+
+def exportar_reporte_pdf(data, path):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("reportlab no está instalado")
+
+    c = pdf_canvas.Canvas(path, pagesize=A4)
+    width, height = A4
+    x_margen = 2 * cm
+    y = height - 2 * cm
+
+    def linea(texto, tam=11, negrita=False, salto=0.7 * cm):
+        nonlocal y
+        c.setFont("Helvetica-Bold" if negrita else "Helvetica", tam)
+        c.drawString(x_margen, y, texto)
+        y -= salto
+
+    linea("REPORTE DE BINGOS", tam=18, negrita=True, salto=1.0 * cm)
+    linea(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", tam=9, salto=0.9 * cm)
+
+    linea(f"Total de bingos vendidos (cantidad): {data['cantidad_total']}", tam=12, negrita=True)
+    linea(f"Total de bingos vendidos (monto): S/ {data['monto_total']:.2f}", tam=12, negrita=True, salto=1.0 * cm)
+
+    linea("Cantidad vendida por precio", tam=13, negrita=True)
+    if data["por_precio"]:
+        for precio, cantidad, subtotal in data["por_precio"]:
+            linea(f"S/ {precio:.2f}   ->   {cantidad} bingo(s)   =   S/ {subtotal:.2f}", tam=11)
+    else:
+        linea("(sin ventas registradas)", tam=11)
+    y -= 0.4 * cm
+
+    linea("Por método de pago", tam=13, negrita=True)
+    ef = data["por_metodo"]["efectivo"]
+    ya = data["por_metodo"]["yape"]
+    linea(f"Efectivo:  {ef['cantidad']} bingo(s)   =   S/ {ef['monto']:.2f}", tam=11)
+    linea(f"Yape:      {ya['cantidad']} bingo(s)   =   S/ {ya['monto']:.2f}", tam=11)
+    y -= 0.4 * cm
+
+    linea("Por pastoral", tam=13, negrita=True)
+    for p in data["por_pastoral"]:
+        rango_txt = ", ".join(f"{ini}-{fin}" for ini, fin in p["rangos"]) if p["rangos"] else "sin rango"
+        linea(
+            f"{p['nombre']} (rango: {rango_txt}): {p['cantidad']} de {p['asignados']} "
+            f"({p['porcentaje']:.1f}%)   =   S/ {p['monto']:.2f}",
+            tam=11,
+        )
+    y -= 0.4 * cm
+
+    linea("Bingos vendidos fuera de su pastoral asignada", tam=13, negrita=True)
+    hay_discrepancias = any(p["vendidos_fuera"] for p in data["por_pastoral"])
+    if not hay_discrepancias:
+        linea("(no hay ningún caso)", tam=11)
+    else:
+        for p in data["por_pastoral"]:
+            for numero, vendedor in p["vendidos_fuera"]:
+                linea(
+                    f"Bingo N° {numero}: asignado a {p['nombre']}, vendido por "
+                    f"{vendedor if vendedor else '-'}",
+                    tam=11,
+                )
+    y -= 0.4 * cm
+    linea("Historial de cambios de precio", tam=13, negrita=True)
+    for precio, fecha_hora in data["historial_precios"]:
+        linea(f"{fecha_hora}   ->   S/ {precio:.2f}", tam=11)
+    c.showPage()
+    c.save()
+
+
+class VentanaReporte(tk.Toplevel):
+    def __init__(self, app: BingoApp):
+        super().__init__(app)
+        self.app = app
+        self.title("Reporte de bingos")
+        self.geometry("600x750")
+        self.resizable(True, True)
+        self.grab_set()
+
+        self.data = get_reporte_data()
+
+        # ---- Contenedor con scroll, para que la ventana no se corte
+        #      aunque la pantalla sea chica (ahora hay más contenido) ----
+        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        contenido = tk.Frame(canvas)
+
+        contenido.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=contenido, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
+        tk.Label(contenido, text="Reporte de bingos", font=("Arial", 16, "bold")).pack(pady=(15, 10))
+
+        resumen = tk.Frame(contenido)
+        resumen.pack(fill="x", padx=20)
+        tk.Label(
+            resumen, text=f"Total vendidos: {self.data['cantidad_total']}",
+            font=("Arial", 12, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            resumen, text=f"Total recaudado: S/ {self.data['monto_total']:.2f}",
+            font=("Arial", 12, "bold"), fg="#2e7d32"
+        ).pack(anchor="w", pady=(2, 10))
+
+        # ---- Cantidad vendida por precio ----
+        tk.Label(contenido, text="Cantidad vendida por precio", font=("Arial", 11, "bold")).pack(
+            anchor="w", padx=20
+        )
+        tabla_precio = ttk.Treeview(
+            contenido, columns=("precio", "cantidad", "subtotal"), show="headings", height=5
+        )
+        tabla_precio.heading("precio", text="Precio (S/)")
+        tabla_precio.heading("cantidad", text="Cantidad")
+        tabla_precio.heading("subtotal", text="Subtotal (S/)")
+        tabla_precio.column("precio", width=120, anchor="center")
+        tabla_precio.column("cantidad", width=120, anchor="center")
+        tabla_precio.column("subtotal", width=140, anchor="center")
+        tabla_precio.pack(fill="x", padx=20, pady=(4, 12))
+        for precio, cantidad, subtotal in self.data["por_precio"]:
+            tabla_precio.insert("", "end", values=(f"{precio:.2f}", cantidad, f"{subtotal:.2f}"))
+
+        # ---- Por método de pago ----
+        tk.Label(contenido, text="Por método de pago", font=("Arial", 11, "bold")).pack(anchor="w", padx=20)
+        tabla_metodo = ttk.Treeview(
+            contenido, columns=("metodo", "cantidad", "monto"), show="headings", height=2
+        )
+        tabla_metodo.heading("metodo", text="Método")
+        tabla_metodo.heading("cantidad", text="Cantidad")
+        tabla_metodo.heading("monto", text="Monto (S/)")
+        tabla_metodo.column("metodo", width=120, anchor="center")
+        tabla_metodo.column("cantidad", width=120, anchor="center")
+        tabla_metodo.column("monto", width=140, anchor="center")
+        tabla_metodo.pack(fill="x", padx=20, pady=(4, 15))
+        ef = self.data["por_metodo"]["efectivo"]
+        ya = self.data["por_metodo"]["yape"]
+        tabla_metodo.insert("", "end", values=("Efectivo", ef["cantidad"], f"{ef['monto']:.2f}"))
+        tabla_metodo.insert("", "end", values=("Yape", ya["cantidad"], f"{ya['monto']:.2f}"))
+
+        # ---- Por pastoral ----
+        tk.Label(contenido, text="Por pastoral", font=("Arial", 11, "bold")).pack(anchor="w", padx=20)
+        tabla_pastoral = ttk.Treeview(
+            contenido,
+            columns=("nombre", "rango", "vendidos", "asignados", "porcentaje", "monto"),
+            show="headings", height=9,
+        )
+        tabla_pastoral.heading("nombre", text="Pastoral")
+        tabla_pastoral.heading("rango", text="Rango(s) asignado(s)")
+        tabla_pastoral.heading("vendidos", text="Vendidos")
+        tabla_pastoral.heading("asignados", text="Asignados")
+        tabla_pastoral.heading("porcentaje", text="% vendido")
+        tabla_pastoral.heading("monto", text="Monto (S/)")
+        tabla_pastoral.column("nombre", width=110, anchor="w")
+        tabla_pastoral.column("rango", width=150, anchor="w")
+        tabla_pastoral.column("vendidos", width=70, anchor="center")
+        tabla_pastoral.column("asignados", width=70, anchor="center")
+        tabla_pastoral.column("porcentaje", width=80, anchor="center")
+        tabla_pastoral.column("monto", width=100, anchor="center")
+        tabla_pastoral.pack(fill="x", padx=20, pady=(4, 4))
+        for p in self.data["por_pastoral"]:
+            rango_txt = ", ".join(f"{ini}-{fin}" for ini, fin in p["rangos"]) if p["rangos"] else "-"
+            tabla_pastoral.insert(
+                "", "end",
+                values=(
+                    p["nombre"], rango_txt, p["cantidad"], p["asignados"],
+                    f"{p['porcentaje']:.1f}%", f"{p['monto']:.2f}",
+                ),
+            )
+
+        # ---- Bingos vendidos fuera de su pastoral asignada ----
+        tk.Label(
+            contenido, text="Bingos vendidos fuera de su pastoral asignada",
+            font=("Arial", 11, "bold")
+        ).pack(anchor="w", padx=20, pady=(10, 0))
+        hay_discrepancias = any(p["vendidos_fuera"] for p in self.data["por_pastoral"])
+        if not hay_discrepancias:
+            tk.Label(
+                contenido, text="(no hay ningún caso — todos se vendieron dentro de su rango)",
+                font=("Arial", 9, "italic"), fg="#666"
+            ).pack(anchor="w", padx=20, pady=(2, 15))
+        else:
+            tabla_discrepancias = ttk.Treeview(
+                contenido, columns=("bingo", "asignado_a", "vendido_por"),
+                show="headings", height=min(10, sum(len(p["vendidos_fuera"]) for p in self.data["por_pastoral"])),
+            )
+            tabla_discrepancias.heading("bingo", text="N° Bingo")
+            tabla_discrepancias.heading("asignado_a", text="Asignado a")
+            tabla_discrepancias.heading("vendido_por", text="Vendido por")
+            tabla_discrepancias.column("bingo", width=90, anchor="center")
+            tabla_discrepancias.column("asignado_a", width=150, anchor="w")
+            tabla_discrepancias.column("vendido_por", width=150, anchor="w")
+            tabla_discrepancias.pack(fill="x", padx=20, pady=(4, 15))
+            for p in self.data["por_pastoral"]:
+                for numero, vendedor in p["vendidos_fuera"]:
+                    tabla_discrepancias.insert(
+                        "", "end",
+                        values=(numero, p["nombre"], vendedor if vendedor else "-"),
+                    )
+
+        # ---- Historial de cambios de precio ----
+        tk.Label(contenido, text="Historial de cambios de precio", font=("Arial", 11, "bold")).pack(
+            anchor="w", padx=20
+        )
+        tabla_historial = ttk.Treeview(
+            contenido, columns=("fecha", "precio"), show="headings", height=4
+        )
+        tabla_historial.heading("fecha", text="Fecha y hora")
+        tabla_historial.heading("precio", text="Precio (S/)")
+        tabla_historial.column("fecha", width=180, anchor="center")
+        tabla_historial.column("precio", width=100, anchor="center")
+        tabla_historial.pack(fill="x", padx=20, pady=(4, 15))
+        for precio, fecha_hora in self.data["historial_precios"]:
+            tabla_historial.insert("", "end", values=(fecha_hora, f"{precio:.2f}"))
+
+        # ---- Botones de exportación ----
+        botones = tk.Frame(contenido)
+        botones.pack(pady=10)
+        tk.Button(botones, text="Exportar como Excel", width=18, command=self.exportar_excel).pack(
+            side="left", padx=5
+        )
+        tk.Button(
+            botones, text="Exportar como PDF", width=18, command=self.exportar_pdf
+        ).pack(side="left", padx=5)
+
+        tk.Button(contenido, text="Cerrar", command=self.destroy).pack(pady=(0, 15))
+
+    def exportar_excel(self):
+        if not OPENPYXL_AVAILABLE:
+            messagebox.showwarning(
+                "Falta una librería",
+                "Para exportar a Excel necesitas instalar 'openpyxl'.\n\n"
+                "Ejecuta en una terminal:\n    pip install openpyxl\n\n"
+                "y vuelve a intentarlo.",
+            )
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar reporte",
+            defaultextension=".xlsx",
+            filetypes=[("Libro de Excel", "*.xlsx")],
+            initialfile=f"reporte_bingos_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        )
+        if not path:
+            return
+        try:
+            todos_los_bingos = buscar_bingos()  # sin filtros = los 4000, igual que la grilla
+            exportar_reporte_excel(self.data, todos_los_bingos, path)
+            messagebox.showinfo("Reporte exportado", f"Reporte guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el reporte:\n{e}")
+
+    def exportar_pdf(self):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showwarning(
+                "Falta una librería",
+                "Para exportar a PDF necesitas instalar 'reportlab'.\n\n"
+                "Ejecuta en una terminal:\n    pip install reportlab\n\n"
+                "y vuelve a intentarlo. Mientras tanto puedes exportar como Excel.",
+            )
+            return
+        path = filedialog.asksaveasfilename(
+            title="Guardar reporte",
+            defaultextension=".pdf",
+            filetypes=[("Documento PDF", "*.pdf")],
+            initialfile=f"reporte_bingos_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        )
+        if not path:
+            return
+        try:
+            exportar_reporte_pdf(self.data, path)
+            messagebox.showinfo("Reporte exportado", f"Reporte guardado en:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el reporte:\n{e}")
+
+
+class DialogoPago(tk.Toplevel):
+    def __init__(self, app: BingoApp, numero: int):
+        super().__init__(app)
+        self.app = app
+        self.numero = numero
+        self.title(f"Bingo N° {numero}")
+        self.geometry("330x460")
+        self.resizable(False, False)
+        self.grab_set()  # modal
+
+        bingo = get_bingo(numero)
+        _, pagado, metodo, precio, pastoral, pastoral_asignada = bingo
+
+        tk.Label(self, text=f"Bingo N° {numero}", font=("Arial", 18, "bold")).pack(pady=(15, 10))
+
+        self.var_pagado = tk.BooleanVar(value=bool(pagado))
+        chk = tk.Checkbutton(
+            self, text="Marcar como pagado", variable=self.var_pagado,
+            font=("Arial", 11), command=self._toggle_campos, width=200
+        )
+        chk.pack(pady=5)
+
+        # Método de pago
+        metodo_frame = tk.LabelFrame(self, text="Método de pago", font=("Arial", 11))
+        metodo_frame.pack(fill="x", padx=20, pady=8)
+        self.var_metodo = tk.StringVar(value=metodo if metodo else "efectivo")
+        tk.Radiobutton(metodo_frame, text="Efectivo", variable=self.var_metodo, value="efectivo", font=("Arial", 11)).pack(side="left", padx=15, pady=6)
+        tk.Radiobutton(metodo_frame, text="Yape", variable=self.var_metodo, value="yape", font=("Arial", 11)).pack(side="left", padx=15)
+
+        # Precio de venta (bloqueado: solo se cambia desde "Precio Bingo")
+        precio_frame = tk.LabelFrame(self, text="Precio de venta (S/)", font=("Arial", 11))
+        precio_frame.pack(fill="x", padx=20, pady=8)
+        precio_default = precio if precio is not None else get_precio_actual()
+        self.var_precio = tk.StringVar(value=f"{precio_default:.2f}")
+        entry_precio = tk.Entry(
+            precio_frame, textvariable=self.var_precio, justify="center",
+            font=("Arial", 11), state="disabled", disabledforeground="#212121"
+        )
+        entry_precio.pack(fill="x", padx=10, pady=(8, 2))
+        tk.Label(
+            precio_frame, text="(Se cambia solo desde \"Precio Bingo\", en la pantalla principal)",
+            font=("Arial", 8, "italic"), fg="#666"
+        ).pack(padx=10, pady=(0, 6))
+
+        # Pastoral
+        pastoral_frame = tk.LabelFrame(self, text="Pastoral", font=("Arial", 11))
+        pastoral_frame.pack(fill="x", padx=20, pady=8)
+        # Si el bingo ya se vendió, se respeta quién lo vendió. Si no,
+        # se prellena con la pastoral asignada por rango (si tiene una),
+        # pero de todas formas se puede cambiar libremente.
+        pastoral_default = pastoral if pastoral else (pastoral_asignada if pastoral_asignada else PASTORALES[0])
+        self.var_pastoral = tk.StringVar(value=pastoral_default)
+        combo_pastoral = ttk.Combobox(
+            pastoral_frame, textvariable=self.var_pastoral, state="readonly",
+            values=PASTORALES, font=("Arial", 11)
+        )
+        combo_pastoral.pack(fill="x", padx=10, pady=(8, 2))
+        if pastoral_asignada and not pagado:
+            tk.Label(
+                pastoral_frame, text=f"(Rango asignado a: {pastoral_asignada})",
+                font=("Arial", 8, "italic"), fg="#666"
+            ).pack(padx=10, pady=(0, 6))
+
+        self.metodo_frame = metodo_frame
+        self.precio_frame = precio_frame
+        self.pastoral_frame = pastoral_frame
+        self.combo_pastoral = combo_pastoral
+        self._toggle_campos()
+
+        botones = tk.Frame(self)
+        botones.pack(pady=15)
+        tk.Button(botones, text="Guardar", width=12, command=self.guardar, bg="#2e7d32", fg="white").pack(side="left", padx=5)
+        tk.Button(botones, text="Cancelar", width=12, command=self.destroy).pack(side="left", padx=5)
+
+    def _toggle_campos(self):
+        estado = "normal" if self.var_pagado.get() else "disabled"
+        for child in self.metodo_frame.winfo_children():
+            child.configure(state=estado)
+        # El precio_frame NO se incluye aquí: el campo de precio se queda
+        # siempre bloqueado (ver comentario en __init__).
+        self.combo_pastoral.configure(state=("readonly" if estado == "normal" else "disabled"))
+
+    def guardar(self):
+        if self.var_pagado.get():
+            valor = self.var_precio.get().strip().replace(",", ".")
+            try:
+                precio = float(valor)
+                if precio < 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning("Precio inválido", "Ingresa un precio válido.")
+                return
+            marcar_pagado(self.numero, self.var_metodo.get(), precio, self.var_pastoral.get())
+        else:
+            marcar_no_pagado(self.numero)
+
+        self.app.refrescar_todo()
+        self.destroy()
+
+
+class VentanaPastorales(tk.Toplevel):
+    def __init__(self, app: BingoApp):
+        super().__init__(app)
+        self.app = app
+        self.title("Bingos entregados por pastoral")
+        self.geometry("460x600")
+        self.resizable(True, True)
+        self.grab_set()
+
+        tk.Label(
+            self, text="Rangos de bingos asignados a cada pastoral",
+            font=("Arial", 13, "bold"), justify="center"
+        ).pack(pady=(15, 10))
+
+        # ---- Contenedor con scroll (puede haber muchas pastorales/rangos) ----
+        canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        self.contenido = tk.Frame(canvas)
+
+        self.contenido.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=self.contenido, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=(20, 0))
+        scrollbar.pack(side="right", fill="y")
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
+        # Guardamos, por pastoral, el frame donde se listan sus rangos y
+        # las variables de los campos "inicio"/"fin" para agregar uno nuevo.
+        self.frames_rangos = {}
+        self.vars_nuevo_rango = {}
+        self.lbl_total_asignado = {}
+
+        for nombre in PASTORALES:
+            self._construir_seccion_pastoral(nombre)
+
+        tk.Button(self, text="Cerrar", command=self.destroy, font=("Arial", 10)).pack(pady=12)
+
+    def _construir_seccion_pastoral(self, nombre):
+        card = tk.LabelFrame(self.contenido, text=nombre, font=("Arial", 11, "bold"))
+        card.pack(fill="x", padx=5, pady=6)
+
+        # Lista de rangos ya asignados a esta pastoral
+        frame_rangos = tk.Frame(card)
+        frame_rangos.pack(fill="x", padx=8, pady=(6, 2))
+        self.frames_rangos[nombre] = frame_rangos
+
+        lbl_total = tk.Label(card, text="", font=("Arial", 9), fg="#555")
+        lbl_total.pack(anchor="w", padx=8)
+        self.lbl_total_asignado[nombre] = lbl_total
+
+        # Fila para agregar un rango nuevo
+        fila_nueva = tk.Frame(card)
+        fila_nueva.pack(fill="x", padx=8, pady=(6, 8))
+
+        tk.Label(fila_nueva, text="Del N°", font=("Arial", 10)).pack(side="left")
+        var_inicio = tk.StringVar()
+        tk.Entry(fila_nueva, textvariable=var_inicio, width=6, justify="center").pack(side="left", padx=(4, 10))
+
+        tk.Label(fila_nueva, text="al N°", font=("Arial", 10)).pack(side="left")
+        var_fin = tk.StringVar()
+        tk.Entry(fila_nueva, textvariable=var_fin, width=6, justify="center").pack(side="left", padx=(4, 10))
+
+        self.vars_nuevo_rango[nombre] = (var_inicio, var_fin)
+
+        tk.Button(
+            fila_nueva, text="Agregar rango", font=("Arial", 9),
+            command=lambda n=nombre: self.agregar_rango(n)
+        ).pack(side="left")
+
+        self._refrescar_rangos(nombre)
+
+    def _refrescar_rangos(self, nombre):
+        frame_rangos = self.frames_rangos[nombre]
+        for widget in frame_rangos.winfo_children():
+            widget.destroy()
+
+        rangos = get_rangos_pastoral(nombre)
+        if not rangos:
+            tk.Label(
+                frame_rangos, text="(sin rangos asignados todavía)",
+                font=("Arial", 9, "italic"), fg="#888"
+            ).pack(anchor="w")
+        else:
+            for rango_id, inicio, fin in rangos:
+                fila = tk.Frame(frame_rangos)
+                fila.pack(fill="x", pady=1)
+                tk.Label(
+                    fila, text=f"Del {inicio} al {fin}  ({fin - inicio + 1} bingos)",
+                    font=("Arial", 10)
+                ).pack(side="left")
+                tk.Button(
+                    fila, text="Quitar", font=("Arial", 8), fg="#c62828",
+                    command=lambda rid=rango_id, n=nombre, ini=inicio, f=fin: self.quitar_rango(rid, n, ini, f)
+                ).pack(side="right")
+                tk.Button(
+                    fila, text="Pagado", font=("Arial", 8), fg="#2e7d32",
+                    command=lambda n=nombre, ini=inicio, f=fin: self.abrir_pagar_rango(n, ini, f)
+                ).pack(side="right", padx=(0, 4))
+
+        total = get_asignados_pastoral(nombre)
+        self.lbl_total_asignado[nombre].configure(text=f"Total asignado: {total} bingo(s)")
+
+    def abrir_pagar_rango(self, nombre, inicio, fin):
+        VentanaPagarRango(self, nombre, inicio, fin)
+
+    def agregar_rango(self, nombre):
+        var_inicio, var_fin = self.vars_nuevo_rango[nombre]
+        try:
+            inicio = int(var_inicio.get().strip())
+            fin = int(var_fin.get().strip())
+        except ValueError:
+            messagebox.showwarning("Rango inválido", "Ingresa números enteros válidos para el rango.")
+            return
+
+        if inicio < 1 or fin > TOTAL_BINGOS or inicio > fin:
+            messagebox.showwarning(
+                "Rango inválido",
+                f"El rango debe estar entre 1 y {TOTAL_BINGOS}, y el inicio no puede ser mayor al fin.",
+            )
+            return
+
+        try:
+            agregar_rango_pastoral(nombre, inicio, fin)
+        except ValueError as e:
+            messagebox.showwarning("Rango ya asignado", str(e))
+            return
+
+        var_inicio.set("")
+        var_fin.set("")
+        self._refrescar_rangos(nombre)
+        self.app.refrescar_todo()
+
+    def quitar_rango(self, rango_id, nombre, inicio, fin):
+        pagados = contar_pagados_rango(inicio, fin)
+        if pagados > 0:
+            confirmar = messagebox.askyesno(
+                "Confirmar",
+                f"El rango {inicio}-{fin} tiene {pagados} bingo(s) YA PAGADO(S).\n\n"
+                "Si quitas este rango, esos bingos volverán a quedar como "
+                "NO PAGADOS (se perderá el registro de esa venta).\n\n"
+                "¿Deseas continuar?",
+            )
+            if not confirmar:
+                return
+
+        eliminar_rango_pastoral(rango_id)
+        self._refrescar_rangos(nombre)
+        self.app.refrescar_todo()
+
+
+class VentanaPagarRango(tk.Toplevel):
+    """Ventana para marcar como pagado, de una sola vez, un rango completo
+    ya asignado a una pastoral — indicando qué parte del rango se pagó en
+    Efectivo y qué parte en Yape (pueden ser varios sub-rangos de cada uno).
+    El precio que se usa es siempre el "Precio Bingo" vigente al momento
+    de guardar."""
+
+    def __init__(self, ventana_pastorales, nombre_pastoral, rango_inicio, rango_fin):
+        super().__init__(ventana_pastorales.app)
+        self.ventana_pastorales = ventana_pastorales
+        self.app = ventana_pastorales.app
+        self.nombre_pastoral = nombre_pastoral
+        self.rango_inicio = rango_inicio
+        self.rango_fin = rango_fin
+
+        self.title(f"Marcar como pagado — {nombre_pastoral}")
+        self.geometry("420x560")
+        self.resizable(True, True)
+        self.grab_set()
+
+        tk.Label(
+            self, text=f"{nombre_pastoral}\nRango asignado: {rango_inicio}-{rango_fin}",
+            font=("Arial", 12, "bold"), justify="center"
+        ).pack(pady=(15, 5))
+        tk.Label(
+            self,
+            text="Indica qué parte de este rango se pagó con cada método\n"
+                 "(puedes agregar varios sub-rangos por método).",
+            font=("Arial", 9), fg="#555", justify="center"
+        ).pack(pady=(0, 10))
+
+        # Rangos "en memoria" (todavía no guardados en la base de datos)
+        self.sub_rangos = {"efectivo": [], "yape": []}
+        self.frames_lista = {}
+        self.vars_nuevo = {}
+
+        self._construir_seccion_metodo("efectivo", "Efectivo")
+        self._construir_seccion_metodo("yape", "Yape")
+
+        tk.Button(
+            self, text="Guardar", command=self.guardar,
+            bg="#2e7d32", fg="white", font=("Arial", 11, "bold"), width=14
+        ).pack(pady=15)
+
+    def _construir_seccion_metodo(self, metodo, etiqueta):
+        card = tk.LabelFrame(self, text=etiqueta, font=("Arial", 11, "bold"))
+        card.pack(fill="x", padx=20, pady=6)
+
+        frame_lista = tk.Frame(card)
+        frame_lista.pack(fill="x", padx=8, pady=(6, 2))
+        self.frames_lista[metodo] = frame_lista
+
+        fila_nueva = tk.Frame(card)
+        fila_nueva.pack(fill="x", padx=8, pady=(6, 8))
+        tk.Label(fila_nueva, text="Del N°", font=("Arial", 10)).pack(side="left")
+        var_inicio = tk.StringVar()
+        tk.Entry(fila_nueva, textvariable=var_inicio, width=6, justify="center").pack(side="left", padx=(4, 10))
+        tk.Label(fila_nueva, text="al N°", font=("Arial", 10)).pack(side="left")
+        var_fin = tk.StringVar()
+        tk.Entry(fila_nueva, textvariable=var_fin, width=6, justify="center").pack(side="left", padx=(4, 10))
+        self.vars_nuevo[metodo] = (var_inicio, var_fin)
+
+        tk.Button(
+            fila_nueva, text="Agregar rango", font=("Arial", 9),
+            command=lambda m=metodo: self.agregar_subrango(m)
+        ).pack(side="left")
+
+        self._refrescar_lista(metodo)
+
+    def _refrescar_lista(self, metodo):
+        frame = self.frames_lista[metodo]
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+        rangos = self.sub_rangos[metodo]
+        if not rangos:
+            tk.Label(
+                frame, text="(sin rangos agregados)",
+                font=("Arial", 9, "italic"), fg="#888"
+            ).pack(anchor="w")
+        else:
+            for idx, (inicio, fin) in enumerate(rangos):
+                fila = tk.Frame(frame)
+                fila.pack(fill="x", pady=1)
+                tk.Label(
+                    fila, text=f"Del {inicio} al {fin}  ({fin - inicio + 1} bingos)",
+                    font=("Arial", 10)
+                ).pack(side="left")
+                tk.Button(
+                    fila, text="Quitar", font=("Arial", 8), fg="#c62828",
+                    command=lambda m=metodo, i=idx: self.quitar_subrango(m, i)
+                ).pack(side="right")
+
+    def agregar_subrango(self, metodo):
+        var_inicio, var_fin = self.vars_nuevo[metodo]
+        try:
+            inicio = int(var_inicio.get().strip())
+            fin = int(var_fin.get().strip())
+        except ValueError:
+            messagebox.showwarning("Rango inválido", "Ingresa números enteros válidos.")
+            return
+
+        if inicio > fin:
+            messagebox.showwarning("Rango inválido", "El inicio no puede ser mayor al fin.")
+            return
+
+        if inicio < self.rango_inicio or fin > self.rango_fin:
+            messagebox.showwarning(
+                "Fuera de rango",
+                f"El sub-rango debe estar dentro del rango asignado a la pastoral "
+                f"({self.rango_inicio}-{self.rango_fin}).",
+            )
+            return
+
+        # No puede cruzarse con ningún sub-rango ya agregado, ni de Efectivo
+        # ni de Yape (un mismo bingo no puede pagarse por los dos métodos).
+        todos = self.sub_rangos["efectivo"] + self.sub_rangos["yape"]
+        for ini_existente, fin_existente in todos:
+            if inicio <= fin_existente and ini_existente <= fin:
+                messagebox.showwarning(
+                    "Rango ya cubierto",
+                    f"El rango {inicio}-{fin} se cruza con el rango {ini_existente}-{fin_existente} "
+                    f"que ya agregaste.",
+                )
+                return
+
+        self.sub_rangos[metodo].append((inicio, fin))
+        var_inicio.set("")
+        var_fin.set("")
+        self._refrescar_lista(metodo)
+
+    def quitar_subrango(self, metodo, idx):
+        del self.sub_rangos[metodo][idx]
+        self._refrescar_lista(metodo)
+
+    def guardar(self):
+        if not self.sub_rangos["efectivo"] and not self.sub_rangos["yape"]:
+            messagebox.showwarning(
+                "Nada que guardar", "Agrega al menos un sub-rango de Efectivo o Yape."
+            )
+            return
+
+        precio = get_precio_actual()
+        marcados_total = 0
+        omitidos_total = 0
+
+        for metodo in ("efectivo", "yape"):
+            for inicio, fin in self.sub_rangos[metodo]:
+                marcados, omitidos = marcar_pagado_rango(
+                    self.nombre_pastoral, inicio, fin, metodo, precio
+                )
+                marcados_total += marcados
+                omitidos_total += omitidos
+
+        mensaje = f"Se marcaron {marcados_total} bingo(s) como pagado(s), a S/ {precio:.2f} cada uno."
+        if omitidos_total:
+            mensaje += f"\n{omitidos_total} bingo(s) ya estaban vendidos y no se modificaron."
+        messagebox.showinfo("Listo", mensaje)
+
+        self.ventana_pastorales._refrescar_rangos(self.nombre_pastoral)
+        self.app.refrescar_todo()
+        self.destroy()
+
+
+def main():
+    init_db()
+    app = BingoApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
